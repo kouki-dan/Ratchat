@@ -18,6 +18,9 @@ async fn main() {
     // Turn our "state" into a new Filter...
     let users = warp::any().map(move || users.clone());
 
+    let messages = Arc::new(Mutex::new(HashMap::new()));
+    let messages = warp::any().map(move || messages.clone());
+
     // POST /room/:name/chat -> send message
     let chat_send = warp::path!("room" / String / "chat" / usize)
         .and(warp::post())
@@ -30,8 +33,9 @@ async fn main() {
             }),
         )
         .and(users.clone())
-        .map(|room_name, my_id, msg, users| {
-            user_message(room_name, my_id, msg, &users);
+        .and(messages.clone())
+        .map(|room_name, my_id, msg, users, messages| {
+            user_message(room_name, my_id, msg, &users, &messages);
             warp::reply()
         });
 
@@ -39,9 +43,10 @@ async fn main() {
     let chat_recv = warp::path!("room" / String / "chat")
         .and(warp::get())
         .and(users)
-        .map(|room_name, users| {
+        .and(messages)
+        .map(|room_name, users, messages| {
             // reply using server-sent events
-            let stream = user_connected(room_name, users);
+            let stream = user_connected(room_name, users, messages);
             warp::sse::reply(warp::sse::keep_alive().stream(stream))
         });
 
@@ -79,14 +84,15 @@ struct NotUtf8;
 impl warp::reject::Reject for NotUtf8 {}
 
 /// Our state of currently connected users.
-///
-/// - Key is their id
-/// - Value is a sender of `Message`
-type Users = Arc<Mutex<HashMap<String, HashMap<usize, mpsc::UnboundedSender<Message>>>>>;
+type RoomKey = String;
+type UserId = usize;
+type Users = Arc<Mutex<HashMap<RoomKey, HashMap<UserId, mpsc::UnboundedSender<Message>>>>>;
+type Messages = Arc<Mutex<HashMap<RoomKey, Vec<String>>>>;
 
 fn user_connected(
     room_name: String,
     users: Users,
+    messages: Messages,
 ) -> impl Stream<Item = Result<Event, warp::Error>> + Send + 'static {
     // Use a counter to assign a new unique ID for this user.
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
@@ -101,6 +107,20 @@ fn user_connected(
     tx.send(Message::UserId(my_id))
         // rx is right above, so this cannot fail
         .unwrap();
+
+    let mut rooms = messages.lock().unwrap();
+    let room = rooms.get(&room_name);
+    match room {
+        Some(room) => {
+            for message in room {
+                tx.send(Message::Reply(message.to_string())).unwrap();
+            }
+        }
+        None => {
+            let new_room = Vec::new();
+            rooms.insert(room_name.clone(), new_room);
+        }
+    }
 
     // Save the sender in our list of connected users.
     let mut rooms = users.lock().unwrap();
@@ -123,7 +143,7 @@ fn user_connected(
     })
 }
 
-fn user_message(room_name: String, my_id: usize, msg: String, users: &Users) {
+fn user_message(room_name: String, my_id: usize, msg: String, users: &Users, messages: &Messages) {
     let new_msg = format!("<User#{}>: {}", my_id, msg);
 
     // New message from this user, send it to everyone else (except same uid)...
@@ -144,6 +164,15 @@ fn user_message(room_name: String, my_id: usize, msg: String, users: &Users) {
                 }
             });
         }
+        None => {
+            println!("なんか変だけど何もしない")
+        }
+    }
+
+    let mut rooms = messages.lock().unwrap();
+    let room = rooms.get_mut(&room_name);
+    match room {
+        Some(room) => room.push(new_msg.clone()),
         None => {
             println!("なんか変だけど何もしない")
         }
