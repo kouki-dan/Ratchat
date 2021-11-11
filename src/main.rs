@@ -35,7 +35,7 @@ async fn main() {
         .and(users.clone())
         .and(messages.clone())
         .map(|room_name, my_id, msg, users, messages| {
-            user_message(room_name, my_id, msg, &users, &messages);
+            user_message(&room_name, my_id, &msg, &users, &messages);
             warp::reply()
         });
 
@@ -46,7 +46,7 @@ async fn main() {
         .and(messages)
         .map(|room_name, users, messages| {
             // reply using server-sent events
-            let stream = user_connected(room_name, users, messages);
+            let stream = user_connected(&room_name, users, messages);
             warp::sse::reply(warp::sse::keep_alive().stream(stream))
         });
 
@@ -90,14 +90,12 @@ type Users = Arc<Mutex<HashMap<RoomKey, HashMap<UserId, mpsc::UnboundedSender<Me
 type Messages = Arc<Mutex<HashMap<RoomKey, Vec<String>>>>;
 
 fn user_connected(
-    room_name: String,
+    room_name: &String,
     users: Users,
     messages: Messages,
 ) -> impl Stream<Item = Result<Event, warp::Error>> + Send + 'static {
     // Use a counter to assign a new unique ID for this user.
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
-
-    eprintln!("new chat user: {}", my_id);
 
     // Use an unbounded channel to handle buffering and flushing of messages
     // to the event source...
@@ -109,7 +107,7 @@ fn user_connected(
         .unwrap();
 
     let mut rooms = messages.lock().unwrap();
-    let room = rooms.get(&room_name);
+    let room = rooms.get(room_name);
     match room {
         Some(room) => {
             for message in room {
@@ -124,7 +122,7 @@ fn user_connected(
 
     // Save the sender in our list of connected users.
     let mut rooms = users.lock().unwrap();
-    let room = rooms.get_mut(&room_name);
+    let room = rooms.get_mut(room_name);
     match room {
         Some(room) => {
             room.insert(my_id, tx);
@@ -132,7 +130,7 @@ fn user_connected(
         None => {
             let mut new_room = HashMap::new();
             new_room.insert(my_id, tx);
-            rooms.insert(room_name, new_room);
+            rooms.insert(room_name.clone(), new_room);
         }
     }
 
@@ -143,7 +141,13 @@ fn user_connected(
     })
 }
 
-fn user_message(room_name: String, my_id: usize, msg: String, users: &Users, messages: &Messages) {
+fn user_message(
+    room_name: &String,
+    my_id: usize,
+    msg: &String,
+    users: &Users,
+    messages: &Messages,
+) {
     let new_msg = format!("<User#{}>: {}", my_id, msg);
 
     // New message from this user, send it to everyone else (except same uid)...
@@ -151,7 +155,7 @@ fn user_message(room_name: String, my_id: usize, msg: String, users: &Users, mes
     // We use `retain` instead of a for loop so that we can reap any user that
     // appears to have disconnected.
     let mut rooms = users.lock().unwrap();
-    let room = rooms.get_mut(&room_name);
+    let room = rooms.get_mut(room_name);
     match room {
         Some(room) => {
             room.retain(|uid, tx| {
@@ -170,7 +174,7 @@ fn user_message(room_name: String, my_id: usize, msg: String, users: &Users, mes
     }
 
     let mut rooms = messages.lock().unwrap();
-    let room = rooms.get_mut(&room_name);
+    let room = rooms.get_mut(room_name);
     match room {
         Some(room) => room.push(new_msg.clone()),
         None => {
